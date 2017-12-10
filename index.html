@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="description" content="chitChat is the best chat server you're ever gonna use let's be real here">
+	<meta name="author" content="Ibrahim Saberi">
+	<link rel="stylesheet" type="text/css" href="http://ec2-50-112-13-81.us-west-2.compute.amazonaws.com/~ibrahimsaberi/chitchat/css/bootstrap.min.css">
+	<link rel="stylesheet" type="text/css" href="http://ec2-50-112-13-81.us-west-2.compute.amazonaws.com/~ibrahimsaberi/chitchat/css/styles.css">
+	<link rel="stylesheet" type="text/css" href="http://ec2-50-112-13-81.us-west-2.compute.amazonaws.com/~ibrahimsaberi/chitchat/css/landing.css">
+	<script src="/socket.io/socket.io.js"></script>
+	
+	<title>chitChat</title>
+	
+	<script type="text/javascript">
+		//Some globals
+		var user; //username
+		var UID; //this isn't used i think
+		var banned_chatrooms = {};
+		banned_chatrooms.the_danger_zone = ["the_danger_zone"];
+		var chatroom_in_use;
+		var is_admin; //if you're an admin in the room you're in
+		var pms = []; //array of private messages you're in
+		
+		var socketio = io.connect();
+		
+		//All registration related socket stuff
+		function use_nickname() {
+			var temp_nickname = document.getElementById("nick-input").value;
+			socketio.emit("register", {nickname:temp_nickname});
+		}
+		socketio.on("register_success", function(data) {
+			user = data.nick; //set until refresh/ close
+			UID = Math.random().toString(36).substring(3,16) + (+new Date()); //we could do some refresh/ set stuff but jordan doesn't want to
+			localStorage.setItem("chatroom_ID", UID); //still dont use this
+			chatroom_in_use = "Lobby";
+			is_admin = "false"; //not in my swamp
+			var fail = document.getElementById("fail-reason");
+			fail.innerHTML = "";
+			display_chatrooms();
+			remove_landing();
+			update_users();
+		});
+		//if registration fails, couple of reasons why it could occur
+		socketio.on("register_fail", function(data) {
+			var fail = document.getElementById("fail-reason");
+			fail.innerHTML = "";
+			var reason;
+			if(data.reason === "exists") {
+				reason = document.createTextNode("Username already exists.");
+			} else if(data.reason === "nullfield") {
+				reason = document.createTextNode("No user input detected.");
+			} else {
+				reason = document.createTextNode("Something went wrong, please try again.");
+			}
+			fail.appendChild(reason);
+		});
+		//removes landing page once registration succeeds
+		function remove_landing() {
+			document.getElementById("landing").style.display = "none";
+			document.getElementById("chatroom").style.display = "block";
+			//document.getElementById("Lobby").className = "active";
+		}
+		
+		//Sending a message
+		function send_message() {
+			var msg = document.getElementById("chat-area").value;
+			var is_pms = false;
+			//checks if chatroom is a private message room
+			for(var p in pms) {
+				if(chatroom_in_use === pms[p]) {
+					is_pms = true;
+				}
+			}
+			if(is_pms) { //if it is then use pm_to_server
+				if(msg === "") { //if entered input is blank sends a mean message
+					document.getElementById("chatlog").appendChild(document.createElement("hr"));
+					document.getElementById("chatlog").appendChild(document.createTextNode("You must enter some input."));
+				} else {
+					socketio.emit("pm_to_server", {
+						message:msg,
+						nick:user,
+						pm:chatroom_in_use
+					});
+				}
+			} else { //if not use message_to_server
+				if(msg === "") { //""
+					document.getElementById("chatlog").appendChild(document.createElement("hr"));
+					document.getElementById("chatlog").appendChild(document.createTextNode("You must enter some input."));
+				} else {
+					socketio.emit("message_to_server", {
+						message:msg,
+						nick:user,
+						chat:chatroom_in_use
+					});
+				}
+			}
+		}
+		socketio.on("message_to_client", function(data) { //received message to client
+			document.getElementById("chatlog").appendChild(document.createElement("hr"));
+            document.getElementById("chatlog").appendChild(document.createTextNode(data.usr + ": " + data.msg));
+		});
+		socketio.on("pm_to_client", function(data) { //received pm to client, only used for PMs that occur if both users are not in the pm room
+			document.getElementById("chatlog").appendChild(document.createElement("hr"));
+			var node = document.createElement("p");
+			node.innerHTML = "<b><font color='green'>PM from " + data.usr + ": " + data.msg + "</font></b>";
+            document.getElementById("chatlog").appendChild(node);
+		});
+		//room creation
+		function create_room() {
+			var private_checked = document.getElementById("private-room"); //checks if it's a private room
+			var room_name = document.getElementById("room-name"); //room name input area
+			if(room_name.value === "") { //input validation (if empty)
+				alert("Please enter a room name.");
+			} else if(private_checked.checked) { //if checked, makes a private room
+				var room_pass = document.getElementById("pass-form");
+				if(room_pass.value === "" || room_pass.value === null) { //input validation, private rooms must have passwords
+					alert("Private rooms must have a password. Please enter a password.");
+				} else {
+					socketio.emit("create_room", { //creates a private room
+						chatroom_name:room_name.value,
+						usr:user,
+						privacy:"private",
+						password:room_pass.value
+					});
+				}
+			} else { //creates a public room
+				socketio.emit("create_room", {
+					chatroom_name:room_name.value,
+					usr:user,
+					privacy:"public",
+					password:""
+				});
+			}
+		} socketio.on("create_room_success", function() { //update chatroom listings for everyoen once chatroom is created
+			display_chatrooms();
+			//chatrooms.push(data.room);
+		});
+		socketio.on("create_room_fail", function(data) { //if create room failed display reasons why
+			if(data.reason === "nullfield") {
+				alert("Somehow submitted a chat room with an empty name. Please try again.");
+			} else if(data.reason === "exists") {
+				alert("This chatroom already exists!");
+			} else {
+				alert("Something went wrong. Please try again later.");
+			}
+		});
+		
+		function display_chatrooms() { //display chatroom listings
+			socketio.emit("request_chatroom_list"); //query for chatroom listings
+		} socketio.on("receive_chatroom_list", function(data) { //receive server-side chatroom list
+			var chatroom_list = document.getElementById("chatroom-bar");
+			chatroom_list.innerHTML = "";
+			//chatrooms = data.chatroom_array;
+			var chatlist = data.chatroom_array;
+			for(var c in chatlist) { //chatlist is put into an array
+				var isnt_banned = true;
+				for(var d in banned_chatrooms) {
+					if(chatlist[c][1] === banned_chatrooms[d][0]) {
+						isnt_banned = false;
+					}
+				}
+				if(isnt_banned) {
+					console.log(chatlist[c][1]); console.log(banned_chatrooms[d][0]);
+					if(chatlist[c][1] !== banned_chatrooms[d][0]) {
+						var chat_li = document.createElement("li");
+						var chat_a = document.createElement("a");
+						chat_a.setAttribute("href", "#");
+						chat_li.setAttribute("id", chatlist[c][1]);
+						if(chat_li.id === chatroom_in_use) {
+							chat_li.setAttribute("class", "active");
+						}
+						chat_a.setAttribute("id", "a_"+chatlist[c][1]);
+						if(chatlist[c][2] === "public") {
+							chat_a.innerHTML = chatlist[c][1];
+						} else {
+							chat_a.innerHTML = chatlist[c][1] + " <i><font size='-1' color='gray'> - Private</font></i>";
+						}
+						chat_li.appendChild(chat_a);
+						chatroom_list.appendChild(chat_li);
+					}
+				}
+			} //creates a bunch of chat listings, appends to the chat list UL element
+		});
+		
+		function update_chatroom() { //updates chatroom title. sorry that this is misleading
+			document.getElementById("chatroom-title").innerHTML = "";
+			if(chatroom_in_use === "" || typeof chatroom_in_use === "undefined") {
+				document.getElementById("chatroom-title").innerHTML = "Lobby";
+			} else document.getElementById("chatroom-title").innerHTML = chatroom_in_use;
+		}
+		
+		function change_room(room, is_pm) { //asks the server politely to change rooms
+			socketio.emit("change_room", {usr:user, chat:room, pm:is_pm});
+		}
+		function change_password_room(room) { //if you tried to change to a password-protected room, ask for password
+			var pass_input = document.getElementById("pwdinput_" + room);
+			socketio.emit("change_password_room", {usr:user, chat:room, pass:pass_input.value});
+		}
+		socketio.on("change_room_success", function(data) { //if the server lets you change rooms, change them
+			document.getElementById(chatroom_in_use).className = "";
+			socketio.emit("message_to_server", {message:"left the room", nick:user, chat:chatroom_in_use}); //previous room is messaged about user leaving
+			//changes chatroom client-side and whether or not the person is admin in current chat
+			chatroom_in_use = data.room;
+			is_admin = data.admin;
+			document.getElementById(data.room).className = "active";
+			document.getElementById("chatlog").innerHTML = "";
+			//update a whole bunch of things
+			update_chatroom();
+			update_pms();
+			update_users();
+			socketio.emit("message_to_server", {message:"joined the room", nick:user, chat:chatroom_in_use}); //new room is messaged about user joining
+			//display_chatrooms();
+		});
+		socketio.on("change_room_fail", function(data) { //if the server says "nah" gives you the reason why
+			if(data.reason === "nullfield") {
+				alert("Please enter a password!");
+			} else if(data.reason === "incorrect_pass") {
+				alert("Password incorrect!");
+			} else {
+				alert("Something went wrong. Please try again later.");
+			}
+		});
+		socketio.on("change_pm_success", function(data) { //same thing as change chat room but for pm rooms
+			document.getElementById(chatroom_in_use).className = "";
+			chatroom_in_use = data.pm;
+			document.getElementById(data.pm).className = "active";
+			document.getElementById("chatlog").innerHTML = "";
+			update_chatroom();
+			update_pms();
+			update_users();
+			//display_chatrooms();
+		});
+		socketio.on("password_required", function(data) { //handles password requirements for joining a room
+			//all of these elements are added to the password-protected room, including password input
+			var chat_element = document.getElementById("a_"+data.room);
+			chat_element.innerHTML = data.room + " <i><font size='-1' color='gray'> - Private</font></i>";
+			var some_div = document.createElement("div");
+			var pass_input = document.createElement("input");
+			pass_input.setAttribute("type", "password");
+			pass_input.setAttribute("placeholder", "Insert Password");
+			pass_input.setAttribute("id", "pwdinput_" + data.room);
+			var pass_submit = document.createElement("button");
+			pass_submit.setAttribute("id", "pass_" + data.room);
+			pass_submit.setAttribute("class", "buntt");
+			pass_submit.innerHTML = "Submit";
+			some_div.appendChild(document.createElement("br"));
+			some_div.appendChild(pass_input);
+			some_div.appendChild(pass_submit);
+			chat_element.appendChild(some_div);
+			//event listener for password submission, validates input as well
+			pass_submit.addEventListener("click", function() {
+				if(pass_input.value === "") {
+					alert("Please enter a password");
+				} else {
+					change_password_room(data.room);
+				}
+			}, false);
+		});
+		socketio.on("someone_changed_rooms", function() { //updates user listings globally when someone changes rooms
+			update_users();
+		});
+		
+		function update_users() { //updates user listing
+			var is_pm = false; //checks if room is a pm room
+			for(var p in pms) {
+				if(chatroom_in_use === pms[p]) {
+					is_pm = true;
+				}
+			}
+			if(is_pm) { //sends appropriate msesage based on that
+				socketio.emit("request_user_list", {usr:user, chat:chatroom_in_use, pm:"yes"});
+			} else {
+				if(chatroom_in_use === "" || typeof chatroom_in_use === "undefined") {
+					socketio.emit("request_user_list", {usr:user, chat:"Lobby", pm:"no"});
+				} else {
+					socketio.emit("request_user_list", {usr:user, chat:chatroom_in_use, pm:"no"});
+				}
+			}
+		} socketio.on("receive_user_list", function(data) { //user list reception
+			//adds all this to user-list ul element in right-most column
+			var user_list = document.getElementById("user-list");
+			user_list.innerHTML = "";
+			var user_array = data.usrarray;
+			for(var u in user_array) {
+				var user_li = document.createElement("li");
+				var user_a = document.createElement("a");
+				user_a.setAttribute("href", "#");
+				user_li.setAttribute("id", "usr_"+user_array[u]);
+				user_a.setAttribute("class", "user-list");
+				//console.log(data.pm);
+				//different logic if it's a pm room or not
+				if(data.pm === "no") {
+					if(data.chat[0] === user_array[u]) {
+						user_li.setAttribute("class", "active");
+					}
+					user_a.setAttribute("id", user_array[u]);
+					if(user_array[u] === user) {
+						user_a.innerHTML = user_array[u] + " <i><font size='-2' color='black'> - you</font></i>";
+					} else if(data.chat[0] === user_array[u]) {
+						user_a.innerHTML = user_array[u] + " <i><font size='-2' color='white'> - creator</font></i>";
+					} else if(user_array[u] === user && data.chat[0] === user_array[u]) {
+						user_a.innerHTML = user_array[u] + " <i><font size='-2' color='white'> - you, creator</font></i>";
+					} else {
+						user_a.innerHTML = user_array[u];
+					}
+					user_li.appendChild(user_a);
+					user_list.appendChild(user_li);
+				} else {
+					if(data.chat === user_array[u]) {
+						user_li.setAttribute("class", "active");
+					}
+					user_a.setAttribute("id", user_array[u]);
+					if(user_array[u] === user) {
+						user_a.innerHTML = user_array[u] + " <i><font size='-2' color='black'> - you</font></i>";
+					} else if(data.chat === user_array[u]) {
+						user_a.innerHTML = user_array[u] + " <i><font size='-2' color='white'> - creator</font></i>";
+					} else if(user_array[u] === user && data.chat === user_array[u]) {
+						user_a.innerHTML = user_array[u] + " <i><font size='-2' color='white'> - you, creator</font></i>";
+					} else {
+						user_a.innerHTML = user_array[u];
+					}
+					user_li.appendChild(user_a);
+					user_list.appendChild(user_li);
+				}
+			}
+		});
+		
+		function user_interact(id, admin) { //handles user clicking on a username in the user listings
+			if(id === user) { //can't click on yourself!
+				return;
+			} else {
+				//basically our code has duplicate ids sometimes and we handle that terrible mess here (were not sorry either)
+				var the_id = document.getElementById(id).id;
+				var elements = document.getElementsByClassName("user-list");
+				var user_a;
+				for(var i = 0; i < elements.length; i++) {
+					console.log(elements[i]);
+					console.log(elements[i].id);
+					console.log(the_id);
+					if(elements[i].id === the_id) {
+						user_a = elements.item(i);
+					}
+				}
+				//checks for something
+				if(document.getElementById("int_"+id) !== null) {
+					return;
+				} else {
+					//creates a whole bunch of elelments, including buttons for pm'ing
+					var other_div = document.createElement("div");
+					other_div.setAttribute("id", "int_"+id);
+					var btn_pm = document.createElement("button");
+					btn_pm.setAttribute("id", "pm_"+id);
+					btn_pm.innerHTML = "Send Message";
+					other_div.appendChild(document.createElement("br"));
+					other_div.appendChild(btn_pm);
+					//if you're an admin you also can kick/ ban users
+					if(admin === "true") {
+						var btn_kick = document.createElement("button");
+						var btn_ban = document.createElement("button");
+						btn_kick.setAttribute("id", "kick_"+id);
+						btn_kick.innerHTML = "Kick User";
+						btn_ban.setAttribute("id", "ban_"+id);
+						btn_ban.innerHTML = "Ban User";
+						other_div.appendChild(document.createElement("br"));
+						other_div.appendChild(btn_kick);
+						other_div.appendChild(document.createElement("br"));
+						other_div.appendChild(btn_ban);
+						btn_kick.addEventListener("click", function() {
+							kick_user(id);
+						});
+						btn_ban.addEventListener("click", function() {
+							ban_user(id);
+						});
+					}
+					user_a.appendChild(other_div);
+					var pm_dne = true;
+					for(var p in pms) {
+						if(pms[p] === id) {
+							pm_dne = false;
+						}
+					}
+					if(pm_dne) {
+						btn_pm.addEventListener("click", function() {
+							create_pm(id);
+							other_div.innerHTML = "";
+						}, false);
+					}
+				}
+			}
+		}
+		
+		function kick_user(some_user) { //kicks a user
+			socketio.emit("request_user_kick", {kicked:some_user, usr:user});
+			socketio.emit("message_to_server", {message:"was kicked from the room", nick:some_user, chat:chatroom_in_use}); //messages the room that they were kicked
+		} socketio.on("kick_user_success", function() {
+			//updates everything
+			update_users();
+			update_chatroom();
+			update_pms();
+			display_chatrooms();
+		});
+		socketio.on("you_were_kicked", function() { //tells you you were kicked
+			chatroom_in_use = "Lobby";
+			update_users();
+			update_chatroom();
+			update_pms();
+			display_chatrooms();
+		});
+		
+		function ban_user(some_user) { //lol
+			socketio.emit("request_user_ban", {banned:some_user, usr:user});
+			socketio.emit("message_to_server", {message:"was banned from the room", nick:some_user, chat:chatroom_in_use});
+		} socketio.on("ban_user_success", function() {
+			update_users();
+			update_chatroom();
+			update_pms();
+			display_chatrooms();
+		});
+		socketio.on("you_were_banned", function(data) {
+			chatroom_in_use = "Lobby";
+			banned_chatrooms[data.chat] = [data.chat];
+			update_users();
+			update_chatroom();
+			update_pms();
+			display_chatrooms();
+		});
+		
+		function update_pms() { //updates pm listings
+			var pm_list = document.getElementById("pm-bar");
+			pm_list.innerHTML = "";
+			for(var p in pms) {
+				var pm_li = document.createElement("li");
+				var pm_a = document.createElement("a");
+				pm_a.setAttribute("href", "#");
+				pm_li.setAttribute("id", pms[p]);
+				if(pm_li.id === chatroom_in_use) {
+					pm_li.setAttribute("class", "active");
+				}
+				pm_a.setAttribute("id", "a_"+pms[p]);
+				pm_a.innerHTML = pms[p];
+				pm_li.appendChild(pm_a);
+				pm_list.appendChild(pm_li);
+			}
+		}
+		
+		function create_pm(name) { //create a pm
+			socketio.emit("create_private_message", {usr:user, pm:name});
+		}
+		socketio.on("create_pm_success", function(data) { //if you're creating a pm or added to a pm the lsting is updated
+			pms.push(data.name);
+			update_pms();
+		});
+		socketio.on("added_to_pm", function(data) {
+			pms.push(data.usr);
+			update_pms();
+		});
+		
+		function broadcast_message() { //broadcast message to all users
+			var msg = document.getElementById("msg-broadcast").value;
+			socketio.emit("broadcast_message", {usr:user, message:msg});
+		}
+		socketio.on("message_to_all_users", function(data) {
+			document.getElementById("chatlog").appendChild(document.createElement("hr"));
+			var node = document.createElement("p");
+			node.innerHTML = "<i><font color='red'>ALERT FROM " + data.usr + "</font></i>" + ": " + data.msg;
+            document.getElementById("chatlog").appendChild(node);
+		});
+		
+		function user_typing() { //checks if a user is currently typing (based on input event)
+			socketio.emit("user_typing", {usr:user, chat:chatroom_in_use});
+		}
+		socketio.on("typing", function(data) {
+			document.getElementById("user-typing").innerHTML = "<i>" + data.usr +" is typing...</i>";
+			setTimeout(function() {
+				document.getElementById("user-typing").innerHTML = "";
+			}, 1500);
+		});
+	</script>
+</head>
+<body>
+	
+	<div id="landing">
+		<div class="form-signin">
+			<h2 class="form-signin-heading">chitChat</h2>
+			<h4>Please enter your desired username</h4>
+			<input type="text" id="nick-input" class="form-control" placeholder="Your name goes here">
+			<br>
+			<button class="btn btn-lg btn-primary btn-block" type="submit" id="btn-user-submit">Enter</button>
+			<script type="text/javascript">
+				document.getElementById("btn-user-submit").addEventListener("click", use_nickname, false);
+			</script>
+			<br>
+			
+			<div class="fail" id="fail-reason">
+				
+			</div>
+		</div>
+	</div>
+    
+    <div id="chatroom" class="home" style="display:none">
+		<nav class="navbar navbar-inverse navbar-fixed-top">
+			<div class="container-fluid">
+				<div class="navbar-header">
+					<button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar" aria-expanded="false" aria-controls="navbar">
+						<span class="sr-only">Toggle navigation</span>
+						<span class="icon-bar"></span>
+						<span class="icon-bar"></span>
+						<span class="icon-bar"></span>
+					</button>
+					<a class="navbar-brand" href="#">chitChat</a>
+				</div>
+				<div id="navbar" class="navbar-collapse collapse">
+					<ul class="nav navbar-nav navbar-right">
+						<li><a href="#">Jordan Gonen</a></li>
+						<li><a href="#">Ibrahim Saberi</a></li>
+					</ul>
+				</div>
+			</div>
+		</nav>
+	  
+		<div class="container-fluid">
+			<div class="row">
+				<div class="col-sm-3 col-md-2 col-lg-2 sidebar">
+					<div id="create-room-box">
+						<h4>Create A Room: </h4><br>
+						<input type="text" id="room-name" placeholder="Room Name"/>
+						<br><input type="checkbox" id="private-room" value="private"/><i><font size="-1" color="gray"> Private?</font></i>
+						<script type="text/javascript">
+							document.getElementById("private-room").addEventListener("click", function() {
+								var check_box = document.getElementById("private-room");
+								if(check_box.checked) {
+									document.getElementById("pass-box").innerHTML = "<input type='password' id='pass-form' placeholder='Insert Password'/>";
+								} else {
+									document.getElementById("pass-box").innerHTML = "";
+								}
+							}, false);
+						</script>
+						<br>
+						<div id="pass-box">
+							
+						</div>
+						<br>
+						<input type="button" id="btn-create-room" value="Submit"/>
+						<script type="text/javascript">
+							document.getElementById("btn-create-room").addEventListener("click", create_room, false);
+						</script>
+					</div>
+					<br>
+					<h4 class="text-center">Rooms</h4><br>
+					<ul class="nav nav-sidebar" id="chatroom-bar">
+						<!-- DYNAMICALLY PUT IN CHATROOMS HERE -->
+					</ul><br>
+					<h4 class="text-center">Private Messages</h4><br>
+					<ul class="nav nav-sidebar" id="pm-bar">
+						<!-- DYNAMICALLY PUT IN PRIVATE MESSAGES HERE -->
+					</ul><br>
+					<script type="text/javascript">
+						document.getElementById("chatroom-bar").addEventListener("click", function(event) {
+							if(event.path[1].localName === "li") {
+								change_room(event.path[1].id, "no");
+							}
+						}, false);
+						document.getElementById("pm-bar").addEventListener("click", function(event) {
+							if(event.path[1].localName === "li") {
+								change_room(event.path[1].id, "yes");
+							}
+						}, false);
+					</script>
+				</div>
+
+				<div class="col-sm-6 col-sm-offset-3 col-md-8 col-md-offset-2 col-lg-8 col-lg-offset-2 main">
+					<h2 class="sub-header text-center" id="chatroom-title">
+						<script type="text/javascript">
+							update_chatroom();
+						</script>
+					</h2>
+					<div id="chatlog">
+						
+					</div>
+					<div id="user-typing" class="user-type">
+						
+					</div>
+					<div class="chat-bar">
+						<input id="chat-area" type="text" placeholder="Type here!" required autofocus/>
+						<input id="chat-submit" type="button" class = "bunt" value="ENTER"/>
+						<script type="text/javascript">
+							document.getElementById("chat-submit").addEventListener("click", send_message, false);
+							document.getElementById("chat-area").addEventListener("input", user_typing ,false);
+						</script>
+					</div>
+				</div>
+				<div id="users-in-chat" class="col-sm-3 col-sm-offset-9 col-md-2 col-md-offset-10 col-lg-2 col-lg-offset-10 sidebar">
+					<h4 class="text-center">Broadcast</h4><br>
+					<input type="text" class="center-block" id="msg-broadcast" placeholder="Message All Users"/>
+					<input type="button" class="center-block" id="btn-broadcast" class = "buntt" value="Submit"/>
+					<script type="text/javascript">
+						document.getElementById("btn-broadcast").addEventListener("click", broadcast_message, false);
+					</script>
+					<h4 class="text-center">Users in Room</h4><br>
+					<ul class="nav nav-sidebar" id="user-list">
+						<!-- DYNAMICALLY PUT IN USERS HERE -->
+					</ul>
+					<script type="text/javascript">
+						document.getElementById("user-list").addEventListener("click", function(event) {
+							if(event.path[1].localName === "li") {
+								user_interact(event.path[0].id, is_admin);
+							}
+						}, false);
+					</script>
+				</div>
+			</div>
+		</div>
+	</div>	
+	<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.12.4/jquery.min.js"></script>
+	<script type="text/javascript">
+		display_chatrooms();
+	</script>
+	<script>//window.jQuery || document.write('<script src="../../assets/js/vendor/jquery.min.js"><\/script>')</script>
+    <script src="js/bootstrap.min.js"></script>
+</body>
+</html>
